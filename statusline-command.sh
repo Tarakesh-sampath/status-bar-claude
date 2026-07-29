@@ -2,15 +2,20 @@
 export PATH="/usr/local/bin:/usr/bin:/bin:$PATH"
 input=$(cat)
 
-IFS=$'\x1f' read -r cwd model ctx_pct hour_pct week_pct hour_reset week_reset <<EOF
+IFS=$'\x1f' read -r cwd model ctx_pct ctx_size hour_pct week_pct hour_reset week_reset thinking effort duration_ms api_duration_ms <<EOF
 $(echo "$input" | jq -r '[
   (.workspace.current_dir // .cwd // ""),
   (.model.display_name // ""),
   ((.context_window.used_percentage // "") | tostring),
+  ((.context_window.context_window_size // "") | tostring),
   (((.rate_limits["5h"] // .rate_limits.five_hour // .rate_limits.hour // {}).used_percentage // "") | tostring),
   (((.rate_limits["7d"] // .rate_limits.seven_day // .rate_limits.week // {}).used_percentage // "") | tostring),
   (((.rate_limits["5h"] // .rate_limits.five_hour // .rate_limits.hour // {}).resets_at // "") | tostring),
-  (((.rate_limits["7d"] // .rate_limits.seven_day // .rate_limits.week // {}).resets_at // "") | tostring)
+  (((.rate_limits["7d"] // .rate_limits.seven_day // .rate_limits.week // {}).resets_at // "") | tostring),
+  (.thinking.enabled | if . then "*" else "" end),
+  (.effort.level // ""),
+  ((.cost.total_duration_ms // "") | tostring),
+  ((.cost.total_api_duration_ms // "") | tostring)
 ] | join("\u001f")')
 EOF
 
@@ -18,6 +23,9 @@ dir=$(basename "$cwd")
 now=$(date +%s)
 [[ "$hour_reset" =~ ^[0-9]+$ ]] || hour_reset=""
 [[ "$week_reset" =~ ^[0-9]+$ ]] || week_reset=""
+thinking="${thinking:-}"; effort="${effort:-}"
+duration_ms="${duration_ms:-}"; api_duration_ms="${api_duration_ms:-}"
+[[ "$ctx_size" =~ ^[0-9]+$ ]] || ctx_size=""
 
 ESC=$'\033'
 RESET="${ESC}[0m"
@@ -52,6 +60,23 @@ fmt_dur() {
   elif (( s >= 3600 ));  then printf '%dh%02dm' $(( s / 3600 )) $(( s % 3600 / 60 ))
   elif (( s >= 60 ));    then printf '%dm' $(( s / 60 ))
   else                        printf '<1m'
+  fi
+}
+
+fmt_dur_ms() {
+  local s=$(( $1 / 1000 ))
+  if   (( s >= 86400 )); then printf '%dd%dh' $(( s / 86400 )) $(( s % 86400 / 3600 ))
+  elif (( s >= 3600 ));  then printf '%dh%02dm' $(( s / 3600 )) $(( s % 3600 / 60 ))
+  elif (( s >= 60 ));    then printf '%dm' $(( s / 60 ))
+  else                        printf '<1m'
+  fi
+}
+
+fmt_tokens() {
+  local n=$1
+  if   (( n >= 1000000 )); then awk -v n="$n" 'BEGIN{printf "%.1fM", n/1000000}'
+  elif (( n >= 1000 ));    then printf '%dk' $(( n / 1000 ))
+  else                          printf '%d' "$n"
   fi
 }
 
@@ -126,15 +151,17 @@ CACHE="$CACHE_DIR/cache"
 mkdir -p "$CACHE_DIR" 2>/dev/null
 
 if [ -f "$CACHE" ]; then
-  read -r cache_ts cache_ctx cache_hour cache_week cache_hr cache_wr cache_model < "$CACHE" 2>/dev/null || cache_ts=0
+  IFS=$'\x1f' read -r cache_ts cache_ctx cache_hour cache_week cache_hr cache_wr cache_model cache_thinking cache_effort cache_duration_ms cache_api_duration_ms cache_ctx_size < "$CACHE" 2>/dev/null || cache_ts=0
 else
   cache_ts=0
 fi
 
 if (( now - cache_ts > 30 )) || [ -z "${cache_ctx:-}" ]; then
-  printf '%s\n' "$now $ctx_i $hour_i $week_i $hour_reset $week_reset $model" > "$CACHE.tmp"
+  printf '%s\x1f%s\x1f%s\x1f%s\x1f%s\x1f%s\x1f%s\x1f%s\x1f%s\x1f%s\x1f%s\x1f%s\n' \
+    "$now" "$ctx_i" "$hour_i" "$week_i" "$hour_reset" "$week_reset" \
+    "$model" "$thinking" "$effort" "$duration_ms" "$api_duration_ms" "$ctx_size" > "$CACHE.tmp"
   mv "$CACHE.tmp" "$CACHE" 2>/dev/null || true
-  read -r cache_ts cache_ctx cache_hour cache_week cache_hr cache_wr cache_model < "$CACHE" 2>/dev/null || true
+  IFS=$'\x1f' read -r cache_ts cache_ctx cache_hour cache_week cache_hr cache_wr cache_model cache_thinking cache_effort cache_duration_ms cache_api_duration_ms cache_ctx_size < "$CACHE" 2>/dev/null || true
 fi
 
 if [ -n "${cache_ctx:-}" ]; then
@@ -144,6 +171,11 @@ if [ -n "${cache_ctx:-}" ]; then
   [ -n "$cache_model" ] && model=$cache_model
   [[ "$cache_hr" =~ ^[0-9]+$ ]] && hour_reset=$cache_hr
   [[ "$cache_wr" =~ ^[0-9]+$ ]] && week_reset=$cache_wr
+  [ -n "$cache_thinking" ] && thinking=$cache_thinking
+  [ -n "$cache_effort" ] && effort=$cache_effort
+  [ -n "$cache_duration_ms" ] && duration_ms=$cache_duration_ms
+  [ -n "$cache_api_duration_ms" ] && api_duration_ms=$cache_api_duration_ms
+  [[ "$cache_ctx_size" =~ ^[0-9]+$ ]] && ctx_size=$cache_ctx_size
 fi
 
 # ── git ──────────────────────────────────────────────────────────────
@@ -184,12 +216,12 @@ vis_len() { printf '%s' "$1" | sed 's/\x1b\[[0-9;]*m//g' | wc -m; }
 
 render() {
   local lvl=$1 name_max sep
-  local BAR_W=0 show_5h=1 show_7d=1 show_branch=1 show_cd=1 show_abs=1 show_wcd=1 show_model=1
+  local BAR_W=0 show_5h=1 show_7d=1 show_branch=1 show_cd=1 show_abs=1 show_wcd=1 show_model=1 show_duration=1
   case $lvl in
-    0)  BAR_W=8;  name_max=24; show_branch=1 show_5h=1 show_7d=1 show_cd=1 show_wcd=1 show_abs=1 show_model=1 ;;
-    1)  BAR_W=6;  name_max=20; show_branch=1 show_5h=1 show_7d=1 show_cd=1 show_wcd=1 show_model=1 ;;
-    2)  BAR_W=6;  name_max=18; show_branch=1 show_5h=1 show_7d=1 show_cd=1 show_wcd=1 ;;
-    3)  BAR_W=4;  name_max=16; show_branch=1 show_5h=1 show_7d=1 show_cd=1 ;;
+    0)  BAR_W=8;  name_max=24; show_branch=1 show_5h=1 show_7d=1 show_cd=1 show_wcd=1 show_abs=1 show_model=1 show_duration=1 ;;
+    1)  BAR_W=6;  name_max=20; show_branch=1 show_5h=1 show_7d=1 show_cd=1 show_wcd=1 show_model=1 show_duration=1 ;;
+    2)  BAR_W=6;  name_max=18; show_branch=1 show_5h=1 show_7d=1 show_cd=1 show_wcd=1 show_duration=1 ;;
+    3)  BAR_W=4;  name_max=16; show_branch=1 show_5h=1 show_7d=1 show_cd=1 show_duration=1 ;;
     4)  BAR_W=0;  name_max=14; show_branch=1 show_5h=1 show_7d=1 ;;
     5)  BAR_W=0;  name_max=12; show_branch=1 show_5h=1 show_7d=1 ;;
     6)  BAR_W=0;  name_max=12; show_branch=1 show_5h=1 ;;
@@ -198,7 +230,7 @@ render() {
     9)  BAR_W=0;  name_max=10 ;;
     10) BAR_W=0;  name_max=10; show_model=0 ;;
   esac
-  sep="  ${DIM}│${RESET}  "
+  sep=" ${DIM}│${RESET} "
 
   local d b
   d=$(trunc "$dir" "$name_max")
@@ -207,14 +239,35 @@ render() {
   OUT="${BOLD_WHITE}${d}${RESET}"
   if [ -n "$branch" ] && (( show_branch )); then
     OUT+=" ${DIM}⎇${RESET} ${GREEN}${b}${RESET}"
-    [ -n "$dirty" ] && OUT+="${YELLOW}●${RESET}"
+    [ -n "$dirty" ] && OUT+=" ${YELLOW}●${RESET}"
     [ -n "$ab" ] && OUT+=" ${DIM}${ab}${RESET}"
   fi
   if (( show_model )); then
     OUT+="${sep}${WHITE}${model:-claude}${RESET}"
+    [ -n "$thinking" ] && OUT+=" ${WHITE}${thinking}${RESET}"
+    [ -n "$effort" ] && OUT+=" ${DIM}${effort}${RESET}"
+  fi
+  if [ -n "$duration_ms" ] && (( show_duration )); then
+    local dur api_dur
+    dur=$(fmt_dur_ms "$duration_ms")
+    OUT+="${sep}${DIM}Tst${RESET} ${WHITE}${dur}${RESET}"
+    if [ -n "$api_duration_ms" ]; then
+      api_dur=$(fmt_dur_ms "$api_duration_ms")
+      OUT+=" ${DIM}api${RESET} ${WHITE}${api_dur}${RESET}"
+    fi
+  fi
+  if (( show_duration )); then
+    local now_str
+    now_str=$(format_reset_time "$now")
+    [ -n "$now_str" ] && OUT+="${sep}${DIM}🕐${RESET} ${WHITE}${now_str}${RESET}"
   fi
   if [ -n "$ctx_i" ]; then
     meter ctx "$ctx_i"
+    if [ -n "$ctx_size" ] && (( ctx_size > 0 )); then
+      local consumed
+      consumed=$(( ctx_i * ctx_size / 100 ))
+      METER+=" ${CYAN}$(fmt_tokens "$consumed")/$(fmt_tokens "$ctx_size")${RESET}"
+    fi
     OUT+="${sep}${METER}"
   fi
   if [ -n "$hour_i" ] && (( show_5h )); then
@@ -222,7 +275,7 @@ render() {
     OUT+="${sep}${METER}"
     if [ -n "$hour_reset" ] && (( show_cd )) && (( hour_reset > now )); then
       cd_color $(( hour_reset - now )) 18000
-      OUT+="  ${DIM}↻${RESET} ${CDC}$(fmt_dur $(( hour_reset - now )))${RESET}"
+      OUT+=" ${DIM}↻${RESET} ${CDC}$(fmt_dur $(( hour_reset - now )))${RESET}"
       if (( show_abs )); then
         abs=$(format_reset_time "$hour_reset") && [ -n "$abs" ] && OUT+=" ${DIM}(${abs})${RESET}"
       fi
@@ -233,7 +286,7 @@ render() {
     OUT+="${sep}${METER}"
     if [ -n "$week_reset" ] && (( show_wcd )) && (( week_reset > now )); then
       cd_color $(( week_reset - now )) 604800
-      OUT+="  ${DIM}↻${RESET} ${CDC}$(fmt_dur $(( week_reset - now )))${RESET}"
+      OUT+=" ${DIM}↻${RESET} ${CDC}$(fmt_dur $(( week_reset - now )))${RESET}"
     fi
   fi
 }
