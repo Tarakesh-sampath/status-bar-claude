@@ -156,7 +156,7 @@ else
   cache_ts=0
 fi
 
-if (( now - cache_ts > 30 )) || [ -z "${cache_ctx:-}" ]; then
+if (( now - cache_ts > 2 )) || [ -z "${cache_ctx:-}" ]; then
   printf '%s\x1f%s\x1f%s\x1f%s\x1f%s\x1f%s\x1f%s\x1f%s\x1f%s\x1f%s\x1f%s\x1f%s\n' \
     "$now" "$ctx_i" "$hour_i" "$week_i" "$hour_reset" "$week_reset" \
     "$model" "$thinking" "$effort" "$duration_ms" "$api_duration_ms" "$ctx_size" > "$CACHE.tmp"

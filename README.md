@@ -53,9 +53,12 @@ In `~/.claude/settings.json`, add:
 {
   "statusLine": {
     "type": "command",
-    "command": "bash ~/.claude/statusline-command.sh"
+    "command": "bash ~/.claude/statusline-command.sh",
+    "refreshInterval": 1
   }
 }
 ```
+
+`refreshInterval` (seconds, minimum `1`) makes Claude Code re-run the script on a timer even when the session is idle, so the clock and session-timing (`Tst`) segments keep ticking instead of only updating on new messages/tool calls.
 
 The script reads JSON from stdin (provided by Claude Code) and prints a colored status string to stdout.
