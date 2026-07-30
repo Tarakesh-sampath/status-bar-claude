@@ -161,9 +161,22 @@ else
 fi
 
 if (( now - cache_ts > 2 )) || [ -z "${cache_ctx:-}" ]; then
+  # merge: a blank field this invocation keeps the last known-good cached value
+  local_ctx=$ctx_i;                 [ -z "$local_ctx" ]        && local_ctx=${cache_ctx:-}
+  local_hour=$hour_i;               [ -z "$local_hour" ]       && local_hour=${cache_hour:-}
+  local_week=$week_i;               [ -z "$local_week" ]       && local_week=${cache_week:-}
+  local_hr=$hour_reset;             [ -z "$local_hr" ]         && local_hr=${cache_hr:-}
+  local_wr=$week_reset;             [ -z "$local_wr" ]         && local_wr=${cache_wr:-}
+  local_model=$model;               [ -z "$local_model" ]      && local_model=${cache_model:-}
+  local_thinking=$thinking;         [ -z "$local_thinking" ]   && local_thinking=${cache_thinking:-}
+  local_effort=$effort;             [ -z "$local_effort" ]     && local_effort=${cache_effort:-}
+  local_duration_ms=$duration_ms;   [ -z "$local_duration_ms" ] && local_duration_ms=${cache_duration_ms:-}
+  local_api_duration_ms=$api_duration_ms; [ -z "$local_api_duration_ms" ] && local_api_duration_ms=${cache_api_duration_ms:-}
+  local_ctx_size=$ctx_size;         [ -z "$local_ctx_size" ]   && local_ctx_size=${cache_ctx_size:-}
+
   printf '%s\x1f%s\x1f%s\x1f%s\x1f%s\x1f%s\x1f%s\x1f%s\x1f%s\x1f%s\x1f%s\x1f%s\n' \
-    "$now" "$ctx_i" "$hour_i" "$week_i" "$hour_reset" "$week_reset" \
-    "$model" "$thinking" "$effort" "$duration_ms" "$api_duration_ms" "$ctx_size" > "$CACHE.tmp"
+    "$now" "$local_ctx" "$local_hour" "$local_week" "$local_hr" "$local_wr" \
+    "$local_model" "$local_thinking" "$local_effort" "$local_duration_ms" "$local_api_duration_ms" "$local_ctx_size" > "$CACHE.tmp"
   mv "$CACHE.tmp" "$CACHE" 2>/dev/null || true
   IFS=$'\x1f' read -r cache_ts cache_ctx cache_hour cache_week cache_hr cache_wr cache_model cache_thinking cache_effort cache_duration_ms cache_api_duration_ms cache_ctx_size < "$CACHE" 2>/dev/null || true
 fi
