@@ -2,8 +2,9 @@
 export PATH="/usr/local/bin:/usr/bin:/bin:$PATH"
 input=$(cat)
 
-IFS=$'\x1f' read -r cwd model ctx_pct ctx_size hour_pct week_pct hour_reset week_reset thinking effort duration_ms api_duration_ms <<EOF
+IFS=$'\x1f' read -r session_id cwd model ctx_pct ctx_size hour_pct week_pct hour_reset week_reset thinking effort duration_ms api_duration_ms <<EOF
 $(echo "$input" | jq -r '[
+  (.session_id // ""),
   (.workspace.current_dir // .cwd // ""),
   (.model.display_name // ""),
   ((.context_window.used_percentage // "") | tostring),
@@ -145,9 +146,12 @@ ctx_i="";  [ -n "$ctx_pct" ]  && ctx_i=$(to_pct "$ctx_pct")
 hour_i=""; [ -n "$hour_pct" ] && hour_i=$(to_pct "$hour_pct")
 week_i=""; [ -n "$week_pct" ] && week_i=$(to_pct "$week_pct")
 
-# ── shared cache — all windows converge ──────────────────────────────
+# ── per-session cache — one file per Claude Code session ─────────────
 CACHE_DIR="${XDG_CACHE_HOME:-$HOME/.cache}/claude-statusline"
-CACHE="$CACHE_DIR/cache"
+cache_key="$session_id"
+[ -z "$cache_key" ] && cache_key=$(ps -o ppid= -p $$ 2>/dev/null | tr -d ' ')
+[ -z "$cache_key" ] && cache_key="fallback"
+CACHE="$CACHE_DIR/cache-$cache_key"
 mkdir -p "$CACHE_DIR" 2>/dev/null
 
 if [ -f "$CACHE" ]; then
