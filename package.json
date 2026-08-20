@@ -1,0 +1,45 @@
+{
+  "name": "status-bar-claude",
+  "version": "1.0.0",
+  "description": "A real-time Claude Code status line for your terminal — context, rate limits, session timing, and git state",
+  "bin": {
+    "status-bar-claude": "bin/cli.js"
+  },
+  "files": [
+    "bin/cli.js",
+    "install.sh",
+    "statusline-command.sh",
+    "README.md",
+    "LICENSE"
+  ],
+  "scripts": {
+    "test": "bash -n install.sh && bash -n statusline-command.sh && node bin/cli.js --version"
+  },
+  "keywords": [
+    "claude",
+    "claude-code",
+    "statusline",
+    "status-line",
+    "terminal",
+    "cli",
+    "prompt"
+  ],
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/Tarakesh-sampath/status-bar-claude.git"
+  },
+  "homepage": "https://github.com/Tarakesh-sampath/status-bar-claude#readme",
+  "bugs": {
+    "url": "https://github.com/Tarakesh-sampath/status-bar-claude/issues"
+  },
+  "license": "MIT",
+  "engines": {
+    "node": ">=14"
+  },
+  "os": [
+    "darwin",
+    "linux",
+    "freebsd",
+    "openbsd"
+  ]
+}

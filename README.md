@@ -54,10 +54,21 @@ render arriving without rate-limit or model data never blanks those segments.
 - `bash`
 - `jq`
 - `git`
+- Node 14+ (only for the `npx` install route)
 
 ## Installation
 
-### One-liner (no clone needed)
+### npx (no clone, no install)
+
+```bash
+npx status-bar-claude
+```
+
+Fetches the package, installs the status line into `~/.claude/`, and exits.
+Requires Node 14+ alongside the usual `bash`, `jq`, and `git`. On Windows, run
+it inside WSL or Git Bash — the status line itself is a bash script.
+
+### curl one-liner
 
 ```bash
 curl -fsSL https://raw.githubusercontent.com/Tarakesh-sampath/status-bar-claude/main/install.sh | bash
