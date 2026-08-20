@@ -73,6 +73,29 @@ curl -fsSL https://raw.githubusercontent.com/Tarakesh-sampath/status-bar-claude/
   | STATUSLINE_BRANCH=dev bash
 ```
 
+### Permissions
+
+The install itself needs **no root** — it only writes `~/.claude/`. Root comes
+up in one case: a missing `bash`, `jq`, or `git`, which the installer offers to
+install through your package manager and therefore runs under `sudo`.
+
+Because `curl … | bash` hands the script to bash on stdin, `sudo` cannot read a
+password there; it falls back to `/dev/tty`. The installer checks for this up
+front and, when it cannot escalate (no `sudo`, no tty, no package manager), it
+stops with the exact command to run instead of hanging on an invisible prompt.
+
+To keep it entirely out of `sudo`, install the three dependencies first — or
+set `STATUSLINE_SKIP_DEPS=1` to skip the check:
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/Tarakesh-sampath/status-bar-claude/main/install.sh \
+  | STATUSLINE_SKIP_DEPS=1 bash
+```
+
+Without `jq`, the installer still writes `~/.claude/settings.json` when there is
+nothing to preserve; if that file already has content it refuses to clobber it
+and prints the block to paste in by hand.
+
 ### From a clone
 
 ```bash
