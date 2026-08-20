@@ -145,7 +145,7 @@ ctx_i="";  [ -n "$ctx_pct" ]  && ctx_i=$(to_pct "$ctx_pct")
 hour_i=""; [ -n "$hour_pct" ] && hour_i=$(to_pct "$hour_pct")
 week_i=""; [ -n "$week_pct" ] && week_i=$(to_pct "$week_pct")
 
-# ── shared cache — all windows converge ──────────────────────────────
+# ── shared cache — merge writes, never blank a field ────────────────
 CACHE_DIR="${XDG_CACHE_HOME:-$HOME/.cache}/claude-statusline"
 CACHE="$CACHE_DIR/cache"
 mkdir -p "$CACHE_DIR" 2>/dev/null
@@ -156,26 +156,37 @@ else
   cache_ts=0
 fi
 
-if (( now - cache_ts > 30 )) || [ -z "${cache_ctx:-}" ]; then
-  printf '%s\x1f%s\x1f%s\x1f%s\x1f%s\x1f%s\x1f%s\x1f%s\x1f%s\x1f%s\x1f%s\x1f%s\n' \
-    "$now" "$ctx_i" "$hour_i" "$week_i" "$hour_reset" "$week_reset" \
-    "$model" "$thinking" "$effort" "$duration_ms" "$api_duration_ms" "$ctx_size" > "$CACHE.tmp"
-  mv "$CACHE.tmp" "$CACHE" 2>/dev/null || true
-  IFS=$'\x1f' read -r cache_ts cache_ctx cache_hour cache_week cache_hr cache_wr cache_model cache_thinking cache_effort cache_duration_ms cache_api_duration_ms cache_ctx_size < "$CACHE" 2>/dev/null || true
-fi
+# Fill empty fields from cache so first render always has complete data
+[ -z "$ctx_i" ]        && ctx_i=$cache_ctx
+[ -z "$hour_i" ]       && hour_i=$cache_hour
+[ -z "$week_i" ]       && week_i=$cache_week
+[ -z "$hour_reset" ]   && [[ "$cache_hr" =~ ^[0-9]+$ ]] && hour_reset=$cache_hr
+[ -z "$week_reset" ]   && [[ "$cache_wr" =~ ^[0-9]+$ ]] && week_reset=$cache_wr
+[ -z "$model" ]        && model=$cache_model
+[ -z "$thinking" ]     && thinking=$cache_thinking
+[ -z "$effort" ]       && effort=$cache_effort
+[ -z "$duration_ms" ]  && duration_ms=$cache_duration_ms
+[ -z "$api_duration_ms" ] && api_duration_ms=$cache_api_duration_ms
+[ -z "$ctx_size" ]     && ctx_size=$cache_ctx_size
 
-if [ -n "${cache_ctx:-}" ]; then
-  ctx_i=$cache_ctx
-  hour_i=$cache_hour
-  week_i=$cache_week
-  [ -n "$cache_model" ] && model=$cache_model
-  [[ "$cache_hr" =~ ^[0-9]+$ ]] && hour_reset=$cache_hr
-  [[ "$cache_wr" =~ ^[0-9]+$ ]] && week_reset=$cache_wr
-  [ -n "$cache_thinking" ] && thinking=$cache_thinking
-  [ -n "$cache_effort" ] && effort=$cache_effort
-  [ -n "$cache_duration_ms" ] && duration_ms=$cache_duration_ms
-  [ -n "$cache_api_duration_ms" ] && api_duration_ms=$cache_api_duration_ms
-  [[ "$cache_ctx_size" =~ ^[0-9]+$ ]] && ctx_size=$cache_ctx_size
+# Merge and write cache if stale (2s TTL)
+if (( now - cache_ts > 2 )); then
+  local_ctx=${ctx_i:-${cache_ctx:-}}
+  local_hour=${hour_i:-${cache_hour:-}}
+  local_week=${week_i:-${cache_week:-}}
+  local_hr=${hour_reset:-${cache_hr:-}}
+  local_wr=${week_reset:-${cache_wr:-}}
+  local_model=${model:-${cache_model:-}}
+  local_thinking=${thinking:-${cache_thinking:-}}
+  local_effort=${effort:-${cache_effort:-}}
+  local_duration_ms=${duration_ms:-${cache_duration_ms:-}}
+  local_api_duration_ms=${api_duration_ms:-${cache_api_duration_ms:-}}
+  local_ctx_size=${ctx_size:-${cache_ctx_size:-}}
+
+  printf '%s\x1f%s\x1f%s\x1f%s\x1f%s\x1f%s\x1f%s\x1f%s\x1f%s\x1f%s\x1f%s\x1f%s\n' \
+    "$now" "$local_ctx" "$local_hour" "$local_week" "$local_hr" "$local_wr" \
+    "$local_model" "$local_thinking" "$local_effort" "$local_duration_ms" "$local_api_duration_ms" "$local_ctx_size" > "$CACHE.tmp"
+  mv "$CACHE.tmp" "$CACHE" 2>/dev/null || true
 fi
 
 # ── git ──────────────────────────────────────────────────────────────

@@ -65,7 +65,7 @@ if [[ ! -f "$SETTINGS" ]]; then
     warn "Created $SETTINGS"
 fi
 
-UPDATED="$(jq '. + {"statusLine": {"type": "command", "command": "bash ~/.claude/statusline-command.sh"}}' "$SETTINGS")"
+UPDATED="$(jq '. + {"statusLine": {"type": "command", "command": "bash ~/.claude/statusline-command.sh", "refreshInterval": 1}}' "$SETTINGS")"
 echo "$UPDATED" > "$SETTINGS"
 ok "Updated $SETTINGS"
 
