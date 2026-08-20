@@ -44,19 +44,36 @@ for dep in jq git bash; do
 done
 ok "All dependencies found"
 
-SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
+REPO="${STATUSLINE_REPO:-Tarakesh-sampath/status-bar-claude}"
+BRANCH="${STATUSLINE_BRANCH:-main}"
+RAW_URL="${STATUSLINE_URL:-https://raw.githubusercontent.com/$REPO/$BRANCH/statusline-command.sh}"
+
+SCRIPT_DIR="$(cd "$(dirname "$0")" 2>/dev/null && pwd || echo .)"
 SOURCE="$SCRIPT_DIR/statusline-command.sh"
 DEST_DIR="$HOME/.claude"
 DEST="$DEST_DIR/statusline-command.sh"
 SETTINGS="$DEST_DIR/settings.json"
 
-if [[ ! -f "$SOURCE" ]]; then
-    err "statusline-command.sh not found in $SCRIPT_DIR"
-    exit 1
+mkdir -p "$DEST_DIR"
+
+if [[ -f "$SOURCE" ]]; then
+    cp "$SOURCE" "$DEST"
+else
+    # Piped from curl / no local checkout — fetch the script from GitHub.
+    warn "No local statusline-command.sh — fetching $RAW_URL"
+    if command -v curl &>/dev/null; then
+        curl -fsSL --connect-timeout 10 --max-time 60 "$RAW_URL" -o "$DEST.tmp"
+    elif command -v wget &>/dev/null; then
+        wget -qT 60 -O "$DEST.tmp" "$RAW_URL"
+    else
+        err "Need curl or wget to download statusline-command.sh"
+        exit 1
+    fi
+    [[ -s "$DEST.tmp" ]] || { err "Download failed or empty: $RAW_URL"; rm -f "$DEST.tmp"; exit 1; }
+    bash -n "$DEST.tmp" || { err "Downloaded script failed syntax check"; rm -f "$DEST.tmp"; exit 1; }
+    mv "$DEST.tmp" "$DEST"
 fi
 
-mkdir -p "$DEST_DIR"
-cp "$SOURCE" "$DEST"
 chmod +x "$DEST"
 ok "Installed $DEST"
 

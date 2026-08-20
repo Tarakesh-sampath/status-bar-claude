@@ -30,6 +30,23 @@ Project   develop   Sonnet 4.6   ctx ▊▊▊▊▊▊▊▊ 60%   5h ▊▊▊
 
 ## Installation
 
+### One-liner (no clone needed)
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/Tarakesh-sampath/status-bar-claude/main/install.sh | bash
+```
+
+The installer downloads `statusline-command.sh` straight from the repo when it
+is run outside a checkout. Override the source with `STATUSLINE_REPO` /
+`STATUSLINE_BRANCH`:
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/Tarakesh-sampath/status-bar-claude/main/install.sh \
+  | STATUSLINE_BRANCH=dev bash
+```
+
+### From a clone
+
 ```bash
 ./install.sh
 ```
@@ -53,7 +70,8 @@ In `~/.claude/settings.json`, add:
 {
   "statusLine": {
     "type": "command",
-    "command": "bash ~/.claude/statusline-command.sh"
+    "command": "bash ~/.claude/statusline-command.sh",
+    "refreshInterval": 1
   }
 }
 ```
