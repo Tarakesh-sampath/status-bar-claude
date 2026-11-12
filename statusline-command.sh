@@ -1,31 +1,42 @@
 #!/usr/bin/env bash
 export PATH="/usr/local/bin:/usr/bin:/bin:$PATH"
-input=$(cat)
-
-IFS=$'\x1f' read -r cwd model ctx_pct ctx_size hour_pct week_pct hour_reset week_reset thinking effort duration_ms api_duration_ms <<EOF
-$(echo "$input" | jq -r '[
+# Fewer child processes means less delay: every `$(...)`, pipe, `date`, `sed`, `awk` is
+# one. So jq reads stdin directly (one process for all fields), and the helpers below
+# return their result in a variable instead of printing it for `$(...)` to capture.
+IFS=$'\x1f' read -r cwd model ctx_pct ctx_size hour_pct week_pct hour_reset week_reset thinking effort duration_ms api_duration_ms ctx_tokens pc_warm pc_seen pc_exp pc_hit pc_ttl <<EOF
+$(jq -r '[
   (.workspace.current_dir // .cwd // ""),
   (.model.display_name // ""),
   ((.context_window.used_percentage // "") | tostring),
   ((.context_window.context_window_size // "") | tostring),
-  (((.rate_limits["5h"] // .rate_limits.five_hour // .rate_limits.hour // {}).used_percentage // "") | tostring),
-  (((.rate_limits["7d"] // .rate_limits.seven_day // .rate_limits.week // {}).used_percentage // "") | tostring),
-  (((.rate_limits["5h"] // .rate_limits.five_hour // .rate_limits.hour // {}).resets_at // "") | tostring),
-  (((.rate_limits["7d"] // .rate_limits.seven_day // .rate_limits.week // {}).resets_at // "") | tostring),
+  (((.rate_limits.five_hour // {}).used_percentage // "") | tostring),
+  (((.rate_limits.seven_day // {}).used_percentage // "") | tostring),
+  (((.rate_limits.five_hour // {}).resets_at // "") | tostring),
+  (((.rate_limits.seven_day // {}).resets_at // "") | tostring),
   (.thinking.enabled | if . then "*" else "" end),
   (.effort.level // ""),
   ((.cost.total_duration_ms // "") | tostring),
-  ((.cost.total_api_duration_ms // "") | tostring)
+  ((.cost.total_api_duration_ms // "") | tostring),
+  ((.context_window.total_input_tokens // "") | tostring),
+  ((.prompt_cache.warm // "") | tostring),
+  ((.prompt_cache.caching_observed // "") | tostring),
+  ((.prompt_cache.expires_at // "") | tostring),
+  ((.prompt_cache.hit_ratio // "") | tostring),
+  ((.prompt_cache.ttl // "") | tostring)
 ] | join("\u001f")')
 EOF
 
-dir=$(basename "$cwd")
-now=$(date +%s)
+dir=${cwd%/}; dir=${dir##*/}
+printf -v now '%(%s)T' -1 2>/dev/null || now=$(date +%s)   # bash 4.2+, else date
 [[ "$hour_reset" =~ ^[0-9]+$ ]] || hour_reset=""
 [[ "$week_reset" =~ ^[0-9]+$ ]] || week_reset=""
 thinking="${thinking:-}"; effort="${effort:-}"
 duration_ms="${duration_ms:-}"; api_duration_ms="${api_duration_ms:-}"
 [[ "$ctx_size" =~ ^[0-9]+$ ]] || ctx_size=""
+[[ "$ctx_tokens" =~ ^[0-9]+$ ]] || ctx_tokens=""
+[[ "$pc_exp" =~ ^[0-9]+$ ]] || pc_exp=""
+[[ "$pc_hit" =~ ^[01]?(\.[0-9]+)?$ ]] || pc_hit=""
+[ "$pc_ttl" = 5m ] && pc_ttl=300 || pc_ttl=3600
 
 ESC=$'\033'
 RESET="${ESC}[0m"
@@ -38,62 +49,102 @@ YELLOW="${ESC}[0;33m"
 RED="${ESC}[0;31m"
 BOLD_RED="${ESC}[1;31m"
 ALERT="${ESC}[1;31m"
+BLUE="${ESC}[0;34m"
+LABL="$DIM" LABR="$RESET"   # label "chip": dim text, or a dark pill in 24-bit color
+TRK="" STOPS=()
 
-to_pct() {
+# ── 24-bit "Claude" palette (r g b); anything else keeps the 16 colors above ──
+TC=0
+case "${CLAUDE_STATUSLINE_COLOR:-${COLORTERM:-}}" in truecolor|24bit) TC=1 ;; esac
+if (( TC )); then
+  C_A0="168 85 58"; C_A1="217 119 87"; C_A2="235 162 133"   # accent, dark to light
+  C_OK="107 170 117"; C_WARN="217 164 65"; C_HOT="217 83 79"
+  C_INK="237 230 225"; C_MUTED="138 133 128"; C_TRACK="46 46 46"; C_CHIP="31 27 25"
+  C_HCOLD="108 155 200"; C_HWARM="217 164 65"; C_HHOT="224 112 58"   # cache heat
+  sgr() { local v=$1 code=$2; shift 2; printf -v "$v" '\033[%s;2;%d;%d;%dm' "$code" "$@"; }
+  sgr DIM 38 $C_MUTED;  sgr WHITE 38 $C_INK;   sgr GREEN 38 $C_OK;  sgr CYAN 38 $C_A2
+  sgr YELLOW 38 $C_WARN; sgr RED 38 $C_HOT;    sgr BLUE 38 $C_HCOLD
+  BOLD_WHITE="${ESC}[1m${WHITE}"; BOLD_RED="${ESC}[1m${RED}"; ALERT=$BOLD_RED
+  sgr TRK 38 $C_TRACK; sgr CHIPBG 48 $C_CHIP
+  LABL="${CHIPBG}${ESC}[1m${WHITE} " LABR=" ${RESET}"
+
+  # fg color at cell i of n along the stops given (each "r g b"), integer math
+  grad_at() {
+    local i=$1 n=$2; shift 2
+    local -a st=("$@"); local k=$(( ${#st[@]} - 1 )) t seg f
+    local -a a b
+    if (( k < 1 )); then sgr GC 38 ${st[0]}; return; fi
+    t=$(( n > 1 ? i * 1000 / (n - 1) : 0 ))
+    seg=$(( t * k / 1000 )); (( seg >= k )) && seg=$(( k - 1 ))
+    f=$(( t * k - seg * 1000 ))
+    a=(${st[seg]}); b=(${st[seg + 1]})
+    sgr GC 38 $(( (a[0] * (1000 - f) + b[0] * f) / 1000 )) \
+              $(( (a[1] * (1000 - f) + b[1] * f) / 1000 )) \
+              $(( (a[2] * (1000 - f) + b[2] * f) / 1000 ))
+  }
+  # bar colors: the accent, turning amber then red as it fills
+  bar_stops() {
+    if   (( $1 >= 85 )); then STOPS=("$C_WARN" "$C_HOT")
+    elif (( $1 >= 60 )); then STOPS=("$C_A0" "$C_WARN")
+    else                      STOPS=("$C_A0" "$C_A1" "$C_A2")
+    fi
+  }
+fi
+
+# Helpers set one result variable (named in the comment) instead of printing.
+
+to_pct() { # VAR value: whole percent, clamped to 0..100
   local v
-  v=$(LC_ALL=C printf '%.0f' "$1" 2>/dev/null)
-  [ -z "$v" ] && v=${1%%.*}
+  LC_ALL=C printf -v v '%.0f' "$2" 2>/dev/null || v=${2%%.*}
   [[ "$v" =~ ^-?[0-9]+$ ]] || v=0
-  [ "$v" -lt 0 ] && v=0
-  [ "$v" -gt 100 ] && v=100
-  printf '%s' "$v"
+  (( v < 0 )) && v=0
+  (( v > 100 )) && v=100
+  printf -v "$1" '%s' "$v"
 }
 
-trunc() {
+trunc() { # TR: string cut to m characters, with an ellipsis
   local s=$1 m=$2
-  if (( ${#s} > m )); then printf '%s…' "${s:0:m-1}"; else printf '%s' "$s"; fi
+  if (( ${#s} > m )); then TR="${s:0:m-1}…"; else TR=$s; fi
 }
 
-fmt_dur() {
+fmt_dur() { # FD: seconds as 2d3h / 1h05m / 7m / <1m
   local s=$1
-  if   (( s >= 86400 )); then printf '%dd%dh' $(( s / 86400 )) $(( s % 86400 / 3600 ))
-  elif (( s >= 3600 ));  then printf '%dh%02dm' $(( s / 3600 )) $(( s % 3600 / 60 ))
-  elif (( s >= 60 ));    then printf '%dm' $(( s / 60 ))
-  else                        printf '<1m'
+  if   (( s >= 86400 )); then printf -v FD '%dd%dh' $(( s / 86400 )) $(( s % 86400 / 3600 ))
+  elif (( s >= 3600 ));  then printf -v FD '%dh%02dm' $(( s / 3600 )) $(( s % 3600 / 60 ))
+  elif (( s >= 60 ));    then printf -v FD '%dm' $(( s / 60 ))
+  else                        FD='<1m'
   fi
 }
 
-fmt_dur_ms() {
-  local s=$(( $1 / 1000 ))
-  if   (( s >= 86400 )); then printf '%dd%dh' $(( s / 86400 )) $(( s % 86400 / 3600 ))
-  elif (( s >= 3600 ));  then printf '%dh%02dm' $(( s / 3600 )) $(( s % 3600 / 60 ))
-  elif (( s >= 60 ));    then printf '%dm' $(( s / 60 ))
-  else                        printf '<1m'
+fmt_tokens() { # FT: 620k, 1.0M
+  local n=$1 t
+  if   (( n >= 1000000 )); then t=$(( (n + 50000) / 100000 )); printf -v FT '%d.%dM' $(( t / 10 )) $(( t % 10 ))
+  elif (( n >= 1000 ));    then printf -v FT '%dk' $(( n / 1000 ))
+  else                          printf -v FT '%d' "$n"
   fi
 }
 
-fmt_tokens() {
-  local n=$1
-  if   (( n >= 1000000 )); then awk -v n="$n" 'BEGIN{printf "%.1fM", n/1000000}'
-  elif (( n >= 1000 ));    then printf '%dk' $(( n / 1000 ))
-  else                          printf '%d' "$n"
-  fi
-}
-
-format_reset_time() {
-  local epoch=$1 hhmm
-  hhmm=$(date -r "$epoch" "+%l:%M %p" 2>/dev/null || date -d "@$epoch" "+%l:%M %p" 2>/dev/null)
+format_reset_time() { # FR: clock time of an epoch, like 2:23pm or 8am
+  local hhmm
+  FR=""
+  printf -v hhmm "%(%l:%M %p)T" "$1" 2>/dev/null \
+    || hhmm=$(date -r "$1" "+%l:%M %p" 2>/dev/null || date -d "@$1" "+%l:%M %p" 2>/dev/null)
   [ -z "$hhmm" ] && return 1
   hhmm="${hhmm# }"
   local hour=${hhmm%%:*} rest=${hhmm#*:}
   local mins=${rest%% *} ampm=${rest##* }
-  ampm=$(printf '%s' "$ampm" | tr '[:upper:]' '[:lower:]')
-  if [ "$mins" = "00" ]; then printf '%s%s' "$hour" "$ampm"
-  else printf '%s:%s%s' "$hour" "$mins" "$ampm"
-  fi
+  case $ampm in AM|am) ampm=am ;; *) ampm=pm ;; esac
+  if [ "$mins" = "00" ]; then FR="${hour}${ampm}"; else FR="${hour}:${mins}${ampm}"; fi
 }
 
 pct_color() {
+  if (( TC )); then
+    if   (( $1 >= 85 )); then PC=$RED
+    elif (( $1 >= 60 )); then PC=$YELLOW
+    else                      PC=$GREEN
+    fi
+    return
+  fi
   if   (( $1 >= 90 )); then PC=$BOLD_RED
   elif (( $1 >= 75 )); then PC=$RED
   elif (( $1 >= 50 )); then PC=$YELLOW
@@ -118,6 +169,19 @@ build_bar() {
   full=$(( e8 / 8 )); rem=$(( e8 % 8 ))
   (( pct > 0 && e8 == 0 )) && rem=1
   BAR=""
+  if (( TC )); then
+    for (( i = 0; i < w; i++ )); do
+      if (( i < full )); then
+        grad_at "$i" "$w" "${STOPS[@]}"; BAR+="${GC}█"
+      elif (( i == full && rem > 0 )); then
+        grad_at "$i" "$w" "${STOPS[@]}"; BAR+="${GC}${ESC}[48;2;${C_TRACK// /;}m${EIGHTH[$rem]}${RESET}"
+      else
+        BAR+="${TRK}█"
+      fi
+    done
+    BAR+=$RESET
+    return
+  fi
   for (( i = 0; i < w; i++ )); do
     if (( i < full )); then
       BAR+="${WHITE}█"
@@ -133,105 +197,93 @@ build_bar() {
 meter() {
   local label=$1 pct=$2 barstr=""
   pct_color "$pct"
-  if (( BAR_W > 0 )); then build_bar "$pct" "$BAR_W"; barstr=" $BAR"; fi
+  if (( BAR_W > 0 )); then (( TC )) && bar_stops "$pct"; build_bar "$pct" "$BAR_W"; barstr=" $BAR"; fi
   if (( pct >= 90 )); then
-    METER="${DIM}${label}${RESET}${barstr} ${ALERT}⚠ ${pct}%${RESET}"
+    METER="${LABL}${label}${LABR}${barstr} ${ALERT}⚠ ${pct}%${RESET}"
   else
-    METER="${DIM}${label}${RESET}${barstr} ${PC}${pct}%${RESET}"
+    METER="${LABL}${label}${LABR}${barstr} ${PC}${pct}%${RESET}"
   fi
 }
 
-ctx_i="";  [ -n "$ctx_pct" ]  && ctx_i=$(to_pct "$ctx_pct")
-hour_i=""; [ -n "$hour_pct" ] && hour_i=$(to_pct "$hour_pct")
-week_i=""; [ -n "$week_pct" ] && week_i=$(to_pct "$week_pct")
+ctx_i="";  [ -n "$ctx_pct" ]  && to_pct ctx_i "$ctx_pct"
+hour_i=""; [ -n "$hour_pct" ] && to_pct hour_i "$hour_pct"
+week_i=""; [ -n "$week_pct" ] && to_pct week_i "$week_pct"
 
-# ── shared cache — merge writes, never blank a field ────────────────
+# ── shared cache: account-wide rate limits only ─────────────────────
+# Every window has the same 5h/7d limits, and Claude sends them only after the
+# first reply. Everything else is per-window and arrives on every run, so it is
+# never cached. Merge writes: a render without limits never blanks them.
 CACHE_DIR="${XDG_CACHE_HOME:-$HOME/.cache}/claude-statusline"
-CACHE="$CACHE_DIR/cache"
-mkdir -p "$CACHE_DIR" 2>/dev/null
+CACHE="$CACHE_DIR/limits"
+[ -d "$CACHE_DIR" ] || mkdir -p "$CACHE_DIR" 2>/dev/null
 
-if [ -f "$CACHE" ]; then
-  IFS=$'\x1f' read -r cache_ts cache_ctx cache_hour cache_week cache_hr cache_wr cache_model cache_thinking cache_effort cache_duration_ms cache_api_duration_ms cache_ctx_size < "$CACHE" 2>/dev/null || cache_ts=0
-else
-  cache_ts=0
-fi
+cache_ts=0 cache_hour="" cache_week="" cache_hr="" cache_wr=""
+[ -f "$CACHE" ] && IFS=$'\x1f' read -r cache_ts cache_hour cache_week cache_hr cache_wr < "$CACHE" 2>/dev/null
+# the file is untrusted input: keep only plain numbers
+[[ "$cache_ts" =~ ^[0-9]{1,12}$ ]]   || cache_ts=0
+[[ "$cache_hour" =~ ^[0-9]{1,3}$ ]]  || cache_hour=""
+[[ "$cache_week" =~ ^[0-9]{1,3}$ ]]  || cache_week=""
+[[ "$cache_hr" =~ ^[0-9]{1,12}$ ]]   || cache_hr=""
+[[ "$cache_wr" =~ ^[0-9]{1,12}$ ]]   || cache_wr=""
+# a window that already reset holds an old reading: drop it
+[ -n "$cache_hr" ] && (( cache_hr <= now )) && { cache_hour=""; cache_hr=""; }
+[ -n "$cache_wr" ] && (( cache_wr <= now )) && { cache_week=""; cache_wr=""; }
 
-# Fill empty fields from cache so first render always has complete data
-[ -z "$ctx_i" ]        && ctx_i=$cache_ctx
-[ -z "$hour_i" ]       && hour_i=$cache_hour
-[ -z "$week_i" ]       && week_i=$cache_week
-[ -z "$hour_reset" ]   && [[ "$cache_hr" =~ ^[0-9]+$ ]] && hour_reset=$cache_hr
-[ -z "$week_reset" ]   && [[ "$cache_wr" =~ ^[0-9]+$ ]] && week_reset=$cache_wr
-[ -z "$model" ]        && model=$cache_model
-[ -z "$thinking" ]     && thinking=$cache_thinking
-[ -z "$effort" ]       && effort=$cache_effort
-[ -z "$duration_ms" ]  && duration_ms=$cache_duration_ms
-[ -z "$api_duration_ms" ] && api_duration_ms=$cache_api_duration_ms
-[ -z "$ctx_size" ]     && ctx_size=$cache_ctx_size
+[ -z "$hour_i" ] && [ -n "$cache_hr" ] && { hour_i=$cache_hour; hour_reset=$cache_hr; }
+[ -z "$week_i" ] && [ -n "$cache_wr" ] && { week_i=$cache_week; week_reset=$cache_wr; }
 
-# Merge and write cache if stale (2s TTL)
-if (( now - cache_ts > 2 )); then
-  local_ctx=${ctx_i:-${cache_ctx:-}}
-  local_hour=${hour_i:-${cache_hour:-}}
-  local_week=${week_i:-${cache_week:-}}
-  local_hr=${hour_reset:-${cache_hr:-}}
-  local_wr=${week_reset:-${cache_wr:-}}
-  local_model=${model:-${cache_model:-}}
-  local_thinking=${thinking:-${cache_thinking:-}}
-  local_effort=${effort:-${cache_effort:-}}
-  local_duration_ms=${duration_ms:-${cache_duration_ms:-}}
-  local_api_duration_ms=${api_duration_ms:-${cache_api_duration_ms:-}}
-  local_ctx_size=${ctx_size:-${cache_ctx_size:-}}
-
-  printf '%s\x1f%s\x1f%s\x1f%s\x1f%s\x1f%s\x1f%s\x1f%s\x1f%s\x1f%s\x1f%s\x1f%s\n' \
-    "$now" "$local_ctx" "$local_hour" "$local_week" "$local_hr" "$local_wr" \
-    "$local_model" "$local_thinking" "$local_effort" "$local_duration_ms" "$local_api_duration_ms" "$local_ctx_size" > "$CACHE.tmp"
-  mv "$CACHE.tmp" "$CACHE" 2>/dev/null || true
+# Write when stale (2s TTL) and the values changed
+if (( now - cache_ts > 2 )) && { [ -n "$hour_i" ] || [ -n "$week_i" ]; } \
+   && [ "$hour_i|$week_i|$hour_reset|$week_reset" != "$cache_hour|$cache_week|$cache_hr|$cache_wr" ]; then
+  printf '%s\x1f%s\x1f%s\x1f%s\x1f%s\n' "$now" "$hour_i" "$week_i" "$hour_reset" "$week_reset" > "$CACHE.tmp" \
+    && mv "$CACHE.tmp" "$CACHE" 2>/dev/null
 fi
 
 # ── git ──────────────────────────────────────────────────────────────
 branch="" dirty="" ab=""
-[ -n "$cwd" ] && gs=$(git -C "$cwd" -c core.hooksPath=/dev/null status --porcelain=v2 --branch --untracked-files=no 2>/dev/null) && {
-  branch=$(sed -n 's/^# branch\.head //p' <<<"$gs")
+abline=""
+if [ -n "$cwd" ] && gs=$(git -C "$cwd" -c core.hooksPath=/dev/null status --porcelain=v2 --branch --untracked-files=no 2>/dev/null); then
+  while IFS= read -r line; do   # parsed in bash: no sed/grep processes
+    case $line in
+      "# branch.head "*) branch=${line#"# branch.head "} ;;
+      "# branch.ab "*)   abline=${line#"# branch.ab "} ;;
+      "#"*) ;;
+      ?*)   dirty=1 ;;
+    esac
+  done <<<"$gs"
   [ "$branch" = "(detached)" ] && branch=$(git -C "$cwd" rev-parse --short HEAD 2>/dev/null)
-  abline=$(sed -n 's/^# branch\.ab //p' <<<"$gs")
   if [ -n "$abline" ]; then
     a=${abline%% *}; b=${abline##* }; a=${a#+}; b=${b#-}
     [ "$a" != 0 ] && ab+="↑$a"
     [ "$b" != 0 ] && ab+="↓$b"
   fi
-  grep -q '^[^#]' <<<"$gs" && dirty=1
-}
+fi
 
 # ── terminal width ───────────────────────────────────────────────────
 cols=${COLUMNS:-}
-if ! [[ "$cols" =~ ^[0-9]+$ ]] || [ "$cols" -le 0 ]; then
-  cols=$( (stty size < /dev/tty) 2>/dev/null | awk '{print $2}')
-fi
-if ! [[ "$cols" =~ ^[0-9]+$ ]] || [ "$cols" -le 0 ]; then
-  pid=$PPID
-  for _ in 1 2 3 4 5; do
-    [[ "$pid" =~ ^[0-9]+$ ]] && [ "$pid" -gt 1 ] || break
-    t=$(ps -o tty= -p "$pid" 2>/dev/null | tr -d ' ')
-    if [ -n "$t" ] && [ "$t" != "?" ] && [ -r "/dev/$t" ]; then
-      cols=$( (stty size < "/dev/$t") 2>/dev/null | awk '{print $2}')
-      [[ "$cols" =~ ^[0-9]+$ ]] && [ "$cols" -gt 0 ] && break
-    fi
-    pid=$(ps -o ppid= -p "$pid" 2>/dev/null | tr -d ' ')
-  done
-fi
 ! [[ "$cols" =~ ^[0-9]+$ ]] || [ "$cols" -le 0 ] && cols=80
 
 PAD=${CLAUDE_STATUSLINE_PAD:-4}
-vis_len() { printf '%s' "$1" | sed 's/\x1b\[[0-9;]*m//g' | wc -m; }
+# VL: visible length with the color codes (ESC ... m) removed. A loop, not
+# ${s//pattern/}: bash's extglob replace is very slow on long strings.
+vis_len() {
+  local s=$1 plain=""
+  while [[ $s == *$'\033'* ]]; do
+    plain+=${s%%$'\033'*}
+    s=${s#*$'\033'}; s=${s#*m}
+  done
+  plain+=$s
+  VL=${#plain}
+}
 
 render() {
   local lvl=$1 name_max sep
-  local BAR_W=0 show_5h=1 show_7d=1 show_branch=1 show_cd=1 show_abs=1 show_wcd=1 show_model=1 show_duration=1
+  # a level lists only what it shows; the model name is the last thing to go (level 10)
+  local BAR_W=0 show_5h=0 show_7d=0 show_branch=0 show_cd=0 show_abs=0 show_wcd=0 show_model=1 show_duration=0 show_hit=0 show_cache=0
   case $lvl in
-    0)  BAR_W=8;  name_max=24; show_branch=1 show_5h=1 show_7d=1 show_cd=1 show_wcd=1 show_abs=1 show_model=1 show_duration=1 ;;
-    1)  BAR_W=6;  name_max=20; show_branch=1 show_5h=1 show_7d=1 show_cd=1 show_wcd=1 show_model=1 show_duration=1 ;;
-    2)  BAR_W=6;  name_max=18; show_branch=1 show_5h=1 show_7d=1 show_cd=1 show_wcd=1 show_duration=1 ;;
+    0)  BAR_W=8;  name_max=24; show_hit=1 show_cache=1 show_branch=1 show_5h=1 show_7d=1 show_cd=1 show_wcd=1 show_abs=1 show_model=1 show_duration=1 ;;
+    1)  BAR_W=6;  name_max=20; show_hit=1 show_cache=1 show_branch=1 show_5h=1 show_7d=1 show_cd=1 show_wcd=1 show_model=1 show_duration=1 ;;
+    2)  BAR_W=6;  name_max=18; show_cache=1 show_branch=1 show_5h=1 show_7d=1 show_cd=1 show_wcd=1 show_duration=1 ;;
     3)  BAR_W=4;  name_max=16; show_branch=1 show_5h=1 show_7d=1 show_cd=1 show_duration=1 ;;
     4)  BAR_W=0;  name_max=14; show_branch=1 show_5h=1 show_7d=1 ;;
     5)  BAR_W=0;  name_max=12; show_branch=1 show_5h=1 show_7d=1 ;;
@@ -243,13 +295,10 @@ render() {
   esac
   sep=" ${DIM}│${RESET} "
 
-  local d b
-  d=$(trunc "$dir" "$name_max")
-  b=$(trunc "$branch" "$name_max")
-
-  OUT="${BOLD_WHITE}${d}${RESET}"
+  trunc "$dir" "$name_max"; OUT="${BOLD_WHITE}${TR}${RESET}"
   if [ -n "$branch" ] && (( show_branch )); then
-    OUT+=" ${DIM}⎇${RESET} ${GREEN}${b}${RESET}"
+    trunc "$branch" "$name_max"
+    OUT+=" ${DIM}⎇${RESET} ${GREEN}${TR}${RESET}"
     [ -n "$dirty" ] && OUT+=" ${YELLOW}●${RESET}"
     [ -n "$ab" ] && OUT+=" ${DIM}${ab}${RESET}"
   fi
@@ -259,25 +308,48 @@ render() {
     [ -n "$effort" ] && OUT+=" ${DIM}${effort}${RESET}"
   fi
   if [ -n "$duration_ms" ] && (( show_duration )); then
-    local dur api_dur
-    dur=$(fmt_dur_ms "$duration_ms")
-    OUT+="${sep}${DIM}Tst${RESET} ${WHITE}${dur}${RESET}"
+    fmt_dur $(( duration_ms / 1000 ))
+    OUT+="${sep}${DIM}Tst${RESET} ${WHITE}${FD}${RESET}"
     if [ -n "$api_duration_ms" ]; then
-      api_dur=$(fmt_dur_ms "$api_duration_ms")
-      OUT+=" ${DIM}api${RESET} ${WHITE}${api_dur}${RESET}"
+      fmt_dur $(( api_duration_ms / 1000 ))
+      OUT+=" ${DIM}api${RESET} ${WHITE}${FD}${RESET}"
     fi
   fi
   if (( show_duration )); then
-    local now_str
-    now_str=$(format_reset_time "$now")
-    [ -n "$now_str" ] && OUT+="${sep}${DIM}🕐${RESET} ${WHITE}${now_str}${RESET}"
+    format_reset_time "$now"
+    [ -n "$FR" ] && OUT+="${sep}${DIM}🕐${RESET} ${WHITE}${FR}${RESET}"
+  fi
+  if [ "$pc_seen" = true ] && (( show_cache )); then
+    if [ "$pc_warm" = true ] && [ -n "$pc_exp" ] && (( pc_exp > now )); then
+      local left=$(( pc_exp - now )) hp cbar=""
+      if (( TC )); then
+        # heat: blue when nearly cold, amber, then orange while the cache is fresh
+        hp=$(( left * 100 / pc_ttl )); (( hp > 100 )) && hp=100
+        if   (( hp > 50 )); then sgr CDC 38 $C_HHOT;  STOPS=("$C_HWARM" "$C_HHOT")
+        elif (( hp > 15 )); then sgr CDC 38 $C_HWARM; STOPS=("$C_HCOLD" "$C_HWARM")
+        else                     CDC=$BLUE;           STOPS=("$C_HCOLD")
+        fi
+        (( BAR_W > 0 )) && { build_bar "$hp" 4; cbar=" $BAR"; }
+      else
+        cd_color "$left" "$pc_ttl"
+      fi
+      fmt_dur "$left"
+      OUT+="${sep}${LABL}cache${LABR}${cbar} ${CDC}${FD}${RESET}"
+    else
+      OUT+="${sep}${LABL}cache${LABR} ${BLUE}cold${RESET}"
+    fi
+    if [ -n "$pc_hit" ] && (( show_hit )); then
+      LC_ALL=C printf -v hp '%.0f' "${pc_hit}e2"   # 0.91 -> 91
+      OUT+=" ${DIM}hit ${hp}%${RESET}"
+    fi
   fi
   if [ -n "$ctx_i" ]; then
     meter ctx "$ctx_i"
     if [ -n "$ctx_size" ] && (( ctx_size > 0 )); then
-      local consumed
-      consumed=$(( ctx_i * ctx_size / 100 ))
-      METER+=" ${CYAN}$(fmt_tokens "$consumed")/$(fmt_tokens "$ctx_size")${RESET}"
+      local consumed=${ctx_tokens:-$(( ctx_i * ctx_size / 100 ))}
+      fmt_tokens "$consumed"; local used_t=$FT
+      fmt_tokens "$ctx_size"
+      METER+=" ${CYAN}${used_t}/${FT}${RESET}"
     fi
     OUT+="${sep}${METER}"
   fi
@@ -286,9 +358,10 @@ render() {
     OUT+="${sep}${METER}"
     if [ -n "$hour_reset" ] && (( show_cd )) && (( hour_reset > now )); then
       cd_color $(( hour_reset - now )) 18000
-      OUT+=" ${DIM}↻${RESET} ${CDC}$(fmt_dur $(( hour_reset - now )))${RESET}"
+      fmt_dur $(( hour_reset - now ))
+      OUT+=" ${DIM}↻${RESET} ${CDC}${FD}${RESET}"
       if (( show_abs )); then
-        abs=$(format_reset_time "$hour_reset") && [ -n "$abs" ] && OUT+=" ${DIM}(${abs})${RESET}"
+        format_reset_time "$hour_reset" && [ -n "$FR" ] && OUT+=" ${DIM}(${FR})${RESET}"
       fi
     fi
   fi
@@ -297,20 +370,23 @@ render() {
     OUT+="${sep}${METER}"
     if [ -n "$week_reset" ] && (( show_wcd )) && (( week_reset > now )); then
       cd_color $(( week_reset - now )) 604800
-      OUT+=" ${DIM}↻${RESET} ${CDC}$(fmt_dur $(( week_reset - now )))${RESET}"
+      fmt_dur $(( week_reset - now ))
+      OUT+=" ${DIM}↻${RESET} ${CDC}${FD}${RESET}"
     fi
   fi
 }
 
 for lvl in 0 1 2 3 4 5 6 7 8 9 10; do
   render "$lvl"
-  (( $(vis_len "$OUT") <= cols - PAD )) && break
+  vis_len "$OUT"
+  (( VL <= cols - PAD )) && break
 done
 
-if (( $(vis_len "$OUT") > cols - PAD )); then
+if (( VL > cols - PAD )); then
   max=$(( cols - PAD ))
   (( max < 1 )) && max=1
-  OUT="${BOLD_WHITE}$(trunc "$dir" "$max")${RESET}"
+  trunc "$dir" "$max"
+  OUT="${BOLD_WHITE}${TR}${RESET}"
 fi
 
 printf '%s' "$OUT"

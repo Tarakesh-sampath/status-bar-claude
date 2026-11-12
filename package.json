@@ -13,7 +13,7 @@
     "LICENSE"
   ],
   "scripts": {
-    "test": "bash -n install.sh && bash -n statusline-command.sh && node bin/cli.js --version"
+    "test": "bash -n install.sh && bash -n statusline-command.sh && node bin/cli.js --version && bash tests/run.sh"
   },
   "keywords": [
     "claude",
