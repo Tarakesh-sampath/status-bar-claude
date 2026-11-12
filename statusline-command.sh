@@ -3,7 +3,7 @@ export PATH="/usr/local/bin:/usr/bin:/bin:$PATH"
 # Fewer child processes means less delay: every `$(...)`, pipe, `date`, `sed`, `awk` is
 # one. So jq reads stdin directly (one process for all fields), and the helpers below
 # return their result in a variable instead of printing it for `$(...)` to capture.
-IFS=$'\x1f' read -r cwd model ctx_pct ctx_size hour_pct week_pct hour_reset week_reset thinking effort duration_ms api_duration_ms ctx_tokens pc_warm pc_seen pc_exp pc_hit pc_ttl <<EOF
+IFS=$'\x1f' read -r cwd model ctx_pct ctx_size hour_pct week_pct hour_reset week_reset thinking effort duration_ms api_duration_ms ctx_tokens <<EOF
 $(jq -r '[
   (.workspace.current_dir // .cwd // ""),
   (.model.display_name // ""),
@@ -17,12 +17,7 @@ $(jq -r '[
   (.effort.level // ""),
   ((.cost.total_duration_ms // "") | tostring),
   ((.cost.total_api_duration_ms // "") | tostring),
-  ((.context_window.total_input_tokens // "") | tostring),
-  ((.prompt_cache.warm // "") | tostring),
-  ((.prompt_cache.caching_observed // "") | tostring),
-  ((.prompt_cache.expires_at // "") | tostring),
-  ((.prompt_cache.hit_ratio // "") | tostring),
-  ((.prompt_cache.ttl // "") | tostring)
+  ((.context_window.total_input_tokens // "") | tostring)
 ] | join("\u001f")')
 EOF
 
@@ -34,39 +29,52 @@ thinking="${thinking:-}"; effort="${effort:-}"
 duration_ms="${duration_ms:-}"; api_duration_ms="${api_duration_ms:-}"
 [[ "$ctx_size" =~ ^[0-9]+$ ]] || ctx_size=""
 [[ "$ctx_tokens" =~ ^[0-9]+$ ]] || ctx_tokens=""
-[[ "$pc_exp" =~ ^[0-9]+$ ]] || pc_exp=""
-[[ "$pc_hit" =~ ^[01]?(\.[0-9]+)?$ ]] || pc_hit=""
-[ "$pc_ttl" = 5m ] && pc_ttl=300 || pc_ttl=3600
 
 ESC=$'\033'
+# No background is set anywhere: the line stays transparent over the terminal.
 RESET="${ESC}[0m"
+BOLD="${ESC}[1m"
 DIM="${ESC}[2;37m"
 WHITE="${ESC}[0;37m"
 BOLD_WHITE="${ESC}[1;37m"
 GREEN="${ESC}[0;32m"
-CYAN="${ESC}[0;36m"
 YELLOW="${ESC}[0;33m"
 RED="${ESC}[0;31m"
 BOLD_RED="${ESC}[1;31m"
 ALERT="${ESC}[1;31m"
-BLUE="${ESC}[0;34m"
-LABL="$DIM" LABR="$RESET"   # label "chip": dim text, or a dark pill in 24-bit color
+ORANGE="${ESC}[0;33m" PEACH="${ESC}[1;33m"      # dir, model
+BLUEF="${ESC}[0;94m"  VIOF="${ESC}[0;95m"       # 5h, 7d
+TEAL="${ESC}[0;36m"   SAND="${ESC}[0;93m"       # session time, clock
 TRK="" STOPS=()
 
 # ── 24-bit "Claude" palette (r g b); anything else keeps the 16 colors above ──
+# An "-ansi" Claude Code theme means: use the terminal's own 16 colors, which the
+# terminal (e.g. VS Code) paints from its theme. Read in bash: no extra process.
+mode=${CLAUDE_STATUSLINE_COLOR:-}
+if [ -z "$mode" ]; then
+  theme=""
+  while IFS= read -r line; do
+    [[ $line =~ \"theme\"[[:space:]]*:[[:space:]]*\"([^\"]*)\" ]] && { theme=${BASH_REMATCH[1]}; break; }
+  done < "${CLAUDE_CONFIG_DIR:-$HOME/.claude}/settings.json" 2>/dev/null
+  case $theme in *-ansi) mode=16 ;; *) mode=${COLORTERM:-} ;; esac
+fi
 TC=0
-case "${CLAUDE_STATUSLINE_COLOR:-${COLORTERM:-}}" in truecolor|24bit) TC=1 ;; esac
+case $mode in truecolor|24bit) TC=1 ;; esac
 if (( TC )); then
-  C_A0="168 85 58"; C_A1="217 119 87"; C_A2="235 162 133"   # accent, dark to light
+  C_A0="168 85 58"; C_A1="217 119 87"; C_A2="235 162 133"   # orange, dark to light
+  C_B0="56 100 150"; C_B1="106 155 204"; C_B2="160 195 230" # blue (5h)
+  C_V0="110 80 160"; C_V1="168 140 214"; C_V2="205 185 235" # violet (7d)
   C_OK="107 170 117"; C_WARN="217 164 65"; C_HOT="217 83 79"
-  C_INK="237 230 225"; C_MUTED="138 133 128"; C_TRACK="46 46 46"; C_CHIP="31 27 25"
-  C_HCOLD="108 155 200"; C_HWARM="217 164 65"; C_HHOT="224 112 58"   # cache heat
+  C_INK="237 230 225"; C_MUTED="138 133 128"; C_TRACK="58 54 52"
+  C_TEAL="100 190 180"; C_SAND="225 200 150"
   sgr() { local v=$1 code=$2; shift 2; printf -v "$v" '\033[%s;2;%d;%d;%dm' "$code" "$@"; }
-  sgr DIM 38 $C_MUTED;  sgr WHITE 38 $C_INK;   sgr GREEN 38 $C_OK;  sgr CYAN 38 $C_A2
-  sgr YELLOW 38 $C_WARN; sgr RED 38 $C_HOT;    sgr BLUE 38 $C_HCOLD
-  BOLD_WHITE="${ESC}[1m${WHITE}"; BOLD_RED="${ESC}[1m${RED}"; ALERT=$BOLD_RED
-  sgr TRK 38 $C_TRACK; sgr CHIPBG 48 $C_CHIP
-  LABL="${CHIPBG}${ESC}[1m${WHITE} " LABR=" ${RESET}"
+  sgr DIM 38 $C_MUTED;  sgr WHITE 38 $C_INK;   sgr GREEN 38 $C_OK
+  sgr YELLOW 38 $C_WARN; sgr RED 38 $C_HOT
+  sgr ORANGE 38 $C_A1; sgr PEACH 38 $C_A2; sgr BLUEF 38 $C_B2; sgr VIOF 38 $C_V2
+  sgr TEAL 38 $C_TEAL; sgr SAND 38 $C_SAND
+  BOLD_WHITE="${BOLD}${WHITE}"; BOLD_RED="${BOLD}${RED}"; ALERT=$BOLD_RED
+  ORANGE="${BOLD}${ORANGE}"; PEACH="${BOLD}${PEACH}"
+  sgr TRK 38 $C_TRACK
 
   # fg color at cell i of n along the stops given (each "r g b"), integer math
   grad_at() {
@@ -82,11 +90,13 @@ if (( TC )); then
               $(( (a[1] * (1000 - f) + b[1] * f) / 1000 )) \
               $(( (a[2] * (1000 - f) + b[2] * f) / 1000 ))
   }
-  # bar colors: the accent, turning amber then red as it fills
+  # bar colors: the hue (o orange, b blue, v violet), turning amber then red as it fills
   bar_stops() {
     if   (( $1 >= 85 )); then STOPS=("$C_WARN" "$C_HOT")
-    elif (( $1 >= 60 )); then STOPS=("$C_A0" "$C_WARN")
-    else                      STOPS=("$C_A0" "$C_A1" "$C_A2")
+    elif (( $1 >= 60 )); then
+      case $2 in b) STOPS=("$C_B0" "$C_WARN") ;; v) STOPS=("$C_V0" "$C_WARN") ;; *) STOPS=("$C_A0" "$C_WARN") ;; esac
+    else
+      case $2 in b) STOPS=("$C_B0" "$C_B1" "$C_B2") ;; v) STOPS=("$C_V0" "$C_V1" "$C_V2") ;; *) STOPS=("$C_A0" "$C_A1" "$C_A2") ;; esac
     fi
   }
 fi
@@ -141,21 +151,21 @@ pct_color() {
   if (( TC )); then
     if   (( $1 >= 85 )); then PC=$RED
     elif (( $1 >= 60 )); then PC=$YELLOW
-    else                      PC=$GREEN
+    else                      PC=$HUEFG
     fi
     return
   fi
   if   (( $1 >= 90 )); then PC=$BOLD_RED
   elif (( $1 >= 75 )); then PC=$RED
   elif (( $1 >= 50 )); then PC=$YELLOW
-  else                      PC=$CYAN
+  else                      PC=$HUEFG
   fi
 }
 
 cd_color() {
   local p=$(( $1 * 100 / $2 ))
   if   (( p >= 50 )); then CDC=$GREEN
-  elif (( p >= 25 )); then CDC=$CYAN
+  elif (( p >= 25 )); then CDC=$TEAL
   elif (( p >= 10 )); then CDC=$YELLOW
   else                     CDC=$RED
   fi
@@ -184,9 +194,9 @@ build_bar() {
   fi
   for (( i = 0; i < w; i++ )); do
     if (( i < full )); then
-      BAR+="${WHITE}█"
+      BAR+="${HUEFG}█"
     elif (( i == full && rem > 0 )); then
-      BAR+="${WHITE}${EIGHTH[$rem]}"
+      BAR+="${HUEFG}${EIGHTH[$rem]}"
     else
       BAR+="${DIM}░${RESET}"
     fi
@@ -194,15 +204,16 @@ build_bar() {
   BAR+=$RESET
 }
 
-meter() {
-  local label=$1 pct=$2 barstr=""
+meter() { # METER: [label] [bar] [pct]; hue o|b|v; empty label = none, "nopct" = no percent
+  local label=$1 pct=$2 nopct=${3:-} hue=${4:-o} parts=()
+  case $hue in b) HUEFG=$BLUEF ;; v) HUEFG=$VIOF ;; *) HUEFG=$PEACH ;; esac
   pct_color "$pct"
-  if (( BAR_W > 0 )); then (( TC )) && bar_stops "$pct"; build_bar "$pct" "$BAR_W"; barstr=" $BAR"; fi
-  if (( pct >= 90 )); then
-    METER="${LABL}${label}${LABR}${barstr} ${ALERT}⚠ ${pct}%${RESET}"
-  else
-    METER="${LABL}${label}${LABR}${barstr} ${PC}${pct}%${RESET}"
+  [ -n "$label" ] && parts+=("${HUEFG}${label}${RESET}")
+  if (( BAR_W > 0 )); then (( TC )) && bar_stops "$pct" "$hue"; build_bar "$pct" "$BAR_W"; parts+=("$BAR"); fi
+  if [ -z "$nopct" ]; then
+    if (( pct >= 90 )); then parts+=("${ALERT}⚠ ${pct}%${RESET}"); else parts+=("${PC}${pct}%${RESET}"); fi
   fi
+  METER="${parts[*]}"
 }
 
 ctx_i="";  [ -n "$ctx_pct" ]  && to_pct ctx_i "$ctx_pct"
@@ -273,17 +284,18 @@ vis_len() {
     s=${s#*$'\033'}; s=${s#*m}
   done
   plain+=$s
-  VL=${#plain}
+  local noemoji=${plain//🕐/}   # the clock emoji is 2 columns wide
+  VL=$(( ${#noemoji} + (${#plain} - ${#noemoji}) * 2 ))
 }
 
 render() {
   local lvl=$1 name_max sep
   # a level lists only what it shows; the model name is the last thing to go (level 10)
-  local BAR_W=0 show_5h=0 show_7d=0 show_branch=0 show_cd=0 show_abs=0 show_wcd=0 show_model=1 show_duration=0 show_hit=0 show_cache=0
+  local BAR_W=0 show_5h=0 show_7d=0 show_branch=0 show_cd=0 show_abs=0 show_wcd=0 show_model=1 show_duration=0
   case $lvl in
-    0)  BAR_W=8;  name_max=24; show_hit=1 show_cache=1 show_branch=1 show_5h=1 show_7d=1 show_cd=1 show_wcd=1 show_abs=1 show_model=1 show_duration=1 ;;
-    1)  BAR_W=6;  name_max=20; show_hit=1 show_cache=1 show_branch=1 show_5h=1 show_7d=1 show_cd=1 show_wcd=1 show_model=1 show_duration=1 ;;
-    2)  BAR_W=6;  name_max=18; show_cache=1 show_branch=1 show_5h=1 show_7d=1 show_cd=1 show_wcd=1 show_duration=1 ;;
+    0)  BAR_W=8;  name_max=24; show_branch=1 show_5h=1 show_7d=1 show_cd=1 show_wcd=1 show_abs=1 show_model=1 show_duration=1 ;;
+    1)  BAR_W=6;  name_max=20; show_branch=1 show_5h=1 show_7d=1 show_cd=1 show_wcd=1 show_model=1 show_duration=1 ;;
+    2)  BAR_W=6;  name_max=18; show_branch=1 show_5h=1 show_7d=1 show_cd=1 show_wcd=1 show_duration=1 ;;
     3)  BAR_W=4;  name_max=16; show_branch=1 show_5h=1 show_7d=1 show_cd=1 show_duration=1 ;;
     4)  BAR_W=0;  name_max=14; show_branch=1 show_5h=1 show_7d=1 ;;
     5)  BAR_W=0;  name_max=12; show_branch=1 show_5h=1 show_7d=1 ;;
@@ -294,84 +306,65 @@ render() {
     10) BAR_W=0;  name_max=10; show_model=0 ;;
   esac
   sep=" ${DIM}│${RESET} "
+  local LAB5="" LAB7=""; (( BAR_W == 0 )) && { LAB5=5h; LAB7=7d; }
 
-  trunc "$dir" "$name_max"; OUT="${BOLD_WHITE}${TR}${RESET}"
+  trunc "$dir" "$name_max"; OUT="${ORANGE}${TR}${RESET}"
   if [ -n "$branch" ] && (( show_branch )); then
     trunc "$branch" "$name_max"
     OUT+=" ${DIM}⎇${RESET} ${GREEN}${TR}${RESET}"
     [ -n "$dirty" ] && OUT+=" ${YELLOW}●${RESET}"
-    [ -n "$ab" ] && OUT+=" ${DIM}${ab}${RESET}"
+    [ -n "$ab" ] && OUT+=" ${TEAL}${ab}${RESET}"
   fi
   if (( show_model )); then
-    OUT+="${sep}${WHITE}${model:-claude}${RESET}"
-    [ -n "$thinking" ] && OUT+=" ${WHITE}${thinking}${RESET}"
+    OUT+="${sep}${PEACH}${model:-claude}${RESET}"
+    [ -n "$thinking" ] && OUT+=" ${SAND}${thinking}${RESET}"
     [ -n "$effort" ] && OUT+=" ${DIM}${effort}${RESET}"
   fi
   if [ -n "$duration_ms" ] && (( show_duration )); then
     fmt_dur $(( duration_ms / 1000 ))
-    OUT+="${sep}${DIM}Tst${RESET} ${WHITE}${FD}${RESET}"
+    OUT+="${sep}${DIM}Tst${RESET} ${TEAL}${FD}${RESET}"
     if [ -n "$api_duration_ms" ]; then
       fmt_dur $(( api_duration_ms / 1000 ))
-      OUT+=" ${DIM}api${RESET} ${WHITE}${FD}${RESET}"
+      OUT+=" ${DIM}api${RESET} ${TEAL}${FD}${RESET}"
     fi
   fi
   if (( show_duration )); then
     format_reset_time "$now"
-    [ -n "$FR" ] && OUT+="${sep}${DIM}🕐${RESET} ${WHITE}${FR}${RESET}"
-  fi
-  if [ "$pc_seen" = true ] && (( show_cache )); then
-    if [ "$pc_warm" = true ] && [ -n "$pc_exp" ] && (( pc_exp > now )); then
-      local left=$(( pc_exp - now )) hp cbar=""
-      if (( TC )); then
-        # heat: blue when nearly cold, amber, then orange while the cache is fresh
-        hp=$(( left * 100 / pc_ttl )); (( hp > 100 )) && hp=100
-        if   (( hp > 50 )); then sgr CDC 38 $C_HHOT;  STOPS=("$C_HWARM" "$C_HHOT")
-        elif (( hp > 15 )); then sgr CDC 38 $C_HWARM; STOPS=("$C_HCOLD" "$C_HWARM")
-        else                     CDC=$BLUE;           STOPS=("$C_HCOLD")
-        fi
-        (( BAR_W > 0 )) && { build_bar "$hp" 4; cbar=" $BAR"; }
-      else
-        cd_color "$left" "$pc_ttl"
-      fi
-      fmt_dur "$left"
-      OUT+="${sep}${LABL}cache${LABR}${cbar} ${CDC}${FD}${RESET}"
-    else
-      OUT+="${sep}${LABL}cache${LABR} ${BLUE}cold${RESET}"
-    fi
-    if [ -n "$pc_hit" ] && (( show_hit )); then
-      LC_ALL=C printf -v hp '%.0f' "${pc_hit}e2"   # 0.91 -> 91
-      OUT+=" ${DIM}hit ${hp}%${RESET}"
-    fi
+    [ -n "$FR" ] && OUT+="${sep}${SAND}🕐 ${FR}${RESET}"
   fi
   if [ -n "$ctx_i" ]; then
-    meter ctx "$ctx_i"
+    meter "" "$ctx_i" nopct o
     if [ -n "$ctx_size" ] && (( ctx_size > 0 )); then
       local consumed=${ctx_tokens:-$(( ctx_i * ctx_size / 100 ))}
       fmt_tokens "$consumed"; local used_t=$FT
       fmt_tokens "$ctx_size"
-      METER+=" ${CYAN}${used_t}/${FT}${RESET}"
+      METER+="${METER:+ }${PC}${used_t}/${FT}${RESET}"
     fi
     OUT+="${sep}${METER}"
   fi
   if [ -n "$hour_i" ] && (( show_5h )); then
-    meter 5h "$hour_i"
+    meter "$LAB5" "$hour_i" "" b
     OUT+="${sep}${METER}"
     if [ -n "$hour_reset" ] && (( show_cd )) && (( hour_reset > now )); then
       cd_color $(( hour_reset - now )) 18000
       fmt_dur $(( hour_reset - now ))
       OUT+=" ${DIM}↻${RESET} ${CDC}${FD}${RESET}"
       if (( show_abs )); then
-        format_reset_time "$hour_reset" && [ -n "$FR" ] && OUT+=" ${DIM}(${FR})${RESET}"
+        format_reset_time "$hour_reset" && [ -n "$FR" ] && OUT+=" ${BLUEF}(${FR})${RESET}"
       fi
     fi
   fi
   if [ -n "$week_i" ] && (( show_7d )); then
-    meter 7d "$week_i"
+    meter "$LAB7" "$week_i" "" v
     OUT+="${sep}${METER}"
     if [ -n "$week_reset" ] && (( show_wcd )) && (( week_reset > now )); then
       cd_color $(( week_reset - now )) 604800
       fmt_dur $(( week_reset - now ))
       OUT+=" ${DIM}↻${RESET} ${CDC}${FD}${RESET}"
+      if (( show_abs )); then
+        local wd; printf -v wd '%(%a)T' "$week_reset" 2>/dev/null
+        format_reset_time "$week_reset" && [ -n "$FR" ] && OUT+=" ${VIOF}(${wd} ${FR})${RESET}"
+      fi
     fi
   fi
 }
@@ -389,4 +382,4 @@ if (( VL > cols - PAD )); then
   OUT="${BOLD_WHITE}${TR}${RESET}"
 fi
 
-printf '%s' "$OUT"
+printf '%s' " ${OUT}${RESET}"

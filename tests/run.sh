@@ -59,7 +59,7 @@ rm -rf "${tmp:?}"/claude-statusline
 COLUMNS=200 bash "$script" <<<"$full" >/dev/null 2>&1
 bare='{"model":{"display_name":"Sonnet"},"workspace":{"current_dir":"'"$root"'"}}'
 out=$(COLUMNS=200 bash "$script" <<<"$bare" 2>/dev/null | strip)
-grep -q '5h .*35%' <<<"$out"; check "cache fills limits for a new window" $?
+grep -q '35%' <<<"$out"; check "cache fills limits for a new window" $?
 
 # per-window data never crosses windows: model, effort, thinking, context
 ! grep -qE 'Opus|43k|ctx|Tst' <<<"$out"; check "cache does not leak per-window data" $?
@@ -83,7 +83,7 @@ for w in 30 50 80 120 200; do
 done
 raw=$(rawtc 200 "$full")
 grep -q $'\033\[38;2;' <<<"$raw"; check "24-bit uses 38;2 colors" $?
-grep -q $'\033\[48;2;' <<<"$raw"; check "24-bit draws label chips and bar track" $?
+grep -q $'\033\[48;2;' <<<"$raw"; check "24-bit draws the bar track and a background only for partial cells" $?
 ! grep -q $'38;2;' <<<"$(CLAUDE_STATUSLINE_COLOR=16 bash "$script" <<<"$full" 2>/dev/null)"; check "16-color mode has no 24-bit codes" $?
 # a bar's first cell is darker than its last (a real gradient)
 hi='{"workspace":{"current_dir":"'"$root"'"},"context_window":{"used_percentage":50,"context_window_size":1000000}}'
