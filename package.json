@@ -1,6 +1,6 @@
 {
   "name": "status-bar-claude",
-  "version": "1.1.0",
+  "version": "1.2.0",
   "description": "A real-time Claude Code status line for your terminal — context, rate limits, session timing, and git state",
   "bin": {
     "status-bar-claude": "bin/cli.js"
